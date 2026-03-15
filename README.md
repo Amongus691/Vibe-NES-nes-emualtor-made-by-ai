@@ -134,6 +134,16 @@ Supports **hardware sweep units** for authentic pitch slides like those heard in
 
 Vibe-NES supports the most common cartridge mappers.
 
+supproted mappers
+*1
+*2
+*3
+*4
+*5
+*6
+*7
+*66
+
 some lightweight games like smb 1, pacman, tetris, legend of zelda, etc work on it
 ecept for some games like smb 2 which is oplayable but has some glitches in it, etc, and smb3, apc mania etc
 do not work and graphics are messed up
