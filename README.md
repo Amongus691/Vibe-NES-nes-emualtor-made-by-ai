@@ -1,5 +1,5 @@
 # Vibe-NES
-![Vibe-NES Preview](nes.png)
+<img src="nes.png" width="700">
 ```text
  __      ___ _                 _   _ ______  _____ 
  \ \    / (_) |               | \ | |  ____|/ ____|
