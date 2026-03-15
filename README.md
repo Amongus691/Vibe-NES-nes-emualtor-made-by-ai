@@ -16,7 +16,7 @@
                                                    
 ```
 
-**Vibe-NES** is a high-performance **single-file NES emulator** “vibe-coded” by AI.
+**Vibe-NES** is a high-performance **single-file NES emulator** vibe-coded by claude sonnet 4.6 and google gemini 3 pro.
 
 Designed for **simplicity and portability**, it packs a full **8-bit hardware stack into a single HTML file**.
 
