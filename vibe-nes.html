@@ -1,0 +1,1163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vibe-NES</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0a0a0f;color:#e8e8e8;font-family:'Press Start 2P',monospace;display:flex;flex-direction:column;align-items:center;min-height:100vh;padding:20px}
+  h1{font-size:14px;color:#ff6b6b;text-shadow:0 0 20px #ff6b6b88;margin-bottom:4px;letter-spacing:2px}
+  .subtitle{font-size:7px;color:#888;margin-bottom:20px;letter-spacing:1px}
+  #screen-wrap{position:relative;border:3px solid #333;box-shadow:0 0 40px #ff6b6b22,0 0 80px #00000088;background:#000}
+  #canvas{display:block;image-rendering:pixelated;image-rendering:crisp-edges;width:512px;height:480px}
+  #overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,0.85);transition:opacity 0.3s}
+  #overlay h2{font-size:11px;color:#ff6b6b;margin-bottom:16px}
+  #overlay p{font-size:7px;color:#aaa;line-height:2;text-align:center}
+  .controls{margin-top:16px;display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+  .btn{background:#1a1a2e;border:2px solid #444;color:#ddd;font-family:'Press Start 2P',monospace;font-size:7px;padding:8px 14px;cursor:pointer;transition:all 0.15s}
+  .btn:hover{border-color:#ff6b6b;color:#ff6b6b;background:#1f1f3a}
+  .btn.primary{border-color:#ff6b6b;color:#ff6b6b}
+  #file-input{display:none}
+  .info-bar{margin-top:10px;display:flex;gap:20px;font-size:7px;color:#555}
+  .info-bar span{color:#777}
+  #fps-counter{color:#4CAF50}
+  #game-name{color:#aaa;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .key-map{margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:6px 20px;font-size:7px;color:#555;max-width:400px}
+  .key-map .key{color:#888}
+  .key-map .action{color:#666}
+  #error-msg{color:#ff6b6b;font-size:7px;margin-top:8px;min-height:14px}
+  #volume-wrap{display:flex;align-items:center;gap:8px;font-size:7px;color:#666;margin-top:8px}
+  input[type=range]{width:80px;accent-color:#ff6b6b}
+</style>
+</head>
+<body>
+<h1>Vibe-NES</h1>
+<div class="subtitle">6502 · PPU · APU · MAPPERS 0,1,2,3,4,7,11,66,71</div>
+
+<div id="screen-wrap">
+  <canvas id="canvas" width="256" height="240"></canvas>
+  <div id="overlay">
+    <h2>READY PLAYER ONE</h2>
+    <p>Drop a .nes ROM here<br>or click LOAD ROM below</p>
+  </div>
+</div>
+
+<div class="controls">
+  <button class="btn primary" onclick="document.getElementById('file-input').click()">LOAD ROM</button>
+  <button class="btn" onclick="resetNES()">RESET</button>
+  <button class="btn" id="pauseBtn" onclick="togglePause()">PAUSE</button>
+  <button class="btn" onclick="toggleFullscreen()">FULLSCREEN</button>
+  <input type="file" id="file-input" accept=".nes" onchange="loadROM(this)">
+</div>
+
+<div id="error-msg"></div>
+
+<div class="info-bar">
+  <span>FPS: <span id="fps-counter">--</span></span>
+  <span>ROM: <span id="game-name">none</span></span>
+  <span>MAPPER: <span id="mapper-id">--</span></span>
+</div>
+
+<div id="volume-wrap">
+  VOL: <input type="range" id="vol" min="0" max="100" value="50" oninput="setVolume(this.value)">
+</div>
+
+<div class="key-map">
+  <span class="key">ARROWS</span><span class="action">D-PAD</span>
+  <span class="key">Z</span><span class="action">A BUTTON</span>
+  <span class="key">X</span><span class="action">B BUTTON</span>
+  <span class="key">ENTER</span><span class="action">START</span>
+  <span class="key">SHIFT</span><span class="action">SELECT</span>
+  <span class="key">R</span><span class="action">RESET</span>
+</div>
+
+<script>
+'use strict';
+
+// ===== NTSC 2C02 palette (64 entries, 0xRRGGBB stored for easy extraction) =====
+const PALETTE_RGB = [
+  0x626262,0x001FB2,0x2404C8,0x520086,0x730060,0x7D0010,0x6D1500,0x4B2900,
+  0x243D00,0x004F00,0x005400,0x00470A,0x003A53,0x000000,0x000000,0x000000,
+  0xABABAB,0x0D57FF,0x4B30FF,0x8A13FF,0xBC08D5,0xD21269,0xC72E00,0x9D5400,
+  0x607B00,0x209800,0x00A300,0x009942,0x007DB4,0x000000,0x000000,0x000000,
+  0xFFFFFF,0x53AEFF,0x9085FF,0xD365FF,0xFF57FF,0xFF5DCF,0xFF7757,0xFA9E00,
+  0xBDC700,0x7AE700,0x43F611,0x26EF7E,0x2CD5F6,0x4E4E4E,0x000000,0x000000,
+  0xFFFFFF,0xB6DFFF,0xC9D1FF,0xE2C9FF,0xF8C7FF,0xFFC7E8,0xFFD0B4,0xFFE0A0,
+  0xF3EFA0,0xD5F9A0,0xB8FCB8,0xAEFBD8,0xB0F2F6,0xB8B8B8,0x000000,0x000000
+];
+
+// ===== MAPPERS =====
+class Mapper{constructor(c){this.c=c;}
+  cpuRead(a){return 0;} cpuWrite(a,v){}
+  ppuRead(a){return 0;} ppuWrite(a,v){}
+  irqState(){return false;} irqClear(){} scanline(){}
+}
+
+class Mapper0 extends Mapper{
+  cpuRead(a){return a>=0x8000?this.c.prgROM[a&(this.c.prgROM.length-1)]:0;}
+  ppuRead(a){return a<0x2000?(this.c.chrROM.length?this.c.chrROM[a]:this.c.chrRAM[a]):0;}
+  ppuWrite(a,v){if(a<0x2000&&!this.c.chrROM.length)this.c.chrRAM[a]=v;}
+}
+
+class Mapper1 extends Mapper{
+  constructor(c){super(c);this.sr=0x10;this.ctrl=0x1C;this.prg=0;this.chr0=0;this.chr1=0;this.chrRAM=new Uint8Array(8192);}
+  cpuRead(a){
+    if(a>=0x6000&&a<0x8000)return this.c.prgRAM[a-0x6000]||0;
+    if(a<0x8000)return 0;
+    const mode=(this.ctrl>>2)&3,half=a>=0xC000?1:0;
+    const np=this.c.prgROM.length/0x4000|0;
+    let bank;
+    if(mode<2)bank=(this.prg>>1)*2+(half?1:0);
+    else if(mode===2)bank=half?this.prg:0;
+    else bank=half?(np-1):this.prg;
+    return this.c.prgROM[(bank%np)*0x4000+(a&0x3FFF)]||0;
+  }
+  cpuWrite(a,v){
+    if(a>=0x6000&&a<0x8000){this.c.prgRAM[a-0x6000]=v;return;}
+    if(a<0x8000)return;
+    if(v&0x80){this.sr=0x10;this.ctrl|=0x0C;return;}
+    const done=this.sr&1;this.sr=(this.sr>>1)|((v&1)<<4);
+    if(done){const r=(a>>13)&3;if(r===0)this.ctrl=this.sr;else if(r===1)this.chr0=this.sr;else if(r===2)this.chr1=this.sr;else this.prg=this.sr&0xF;this.sr=0x10;}
+  }
+  ppuRead(a){
+    if(a>=0x2000)return 0;
+    const has=this.c.chrROM.length>0,src=has?this.c.chrROM:this.chrRAM,sz=src.length;
+    const mode=(this.ctrl>>4)&1;
+    let idx;
+    if(mode===0)idx=((this.chr0&0xFE)*0x1000+(a<0x1000?0:0x1000)+a%0x1000);
+    else idx=(a<0x1000?this.chr0*0x1000+a:this.chr1*0x1000+(a-0x1000));
+    return src[idx%sz]||0;
+  }
+  ppuWrite(a,v){if(a<0x2000&&!this.c.chrROM.length)this.chrRAM[a&0x1FFF]=v;}
+  getMirror(){const m=this.ctrl&3;if(m===0)return 4;if(m===1)return 5;if(m===2)return 1;return 0;}
+}
+
+class Mapper2 extends Mapper{
+  constructor(c){super(c);this.bank=0;}
+  cpuRead(a){
+    if(a>=0x8000&&a<0xC000)return this.c.prgROM[(this.bank*0x4000)+(a-0x8000)]||0;
+    if(a>=0xC000)return this.c.prgROM[(this.c.prgROM.length-0x4000)+(a-0xC000)]||0;
+    return 0;
+  }
+  cpuWrite(a,v){if(a>=0x8000)this.bank=v&0xF;}
+  ppuRead(a){return a<0x2000?(this.c.chrROM.length?this.c.chrROM[a]:this.c.chrRAM[a]):0;}
+  ppuWrite(a,v){if(a<0x2000&&!this.c.chrROM.length)this.c.chrRAM[a]=v;}
+}
+
+class Mapper3 extends Mapper{
+  constructor(c){super(c);this.bank=0;}
+  cpuRead(a){return a>=0x8000?this.c.prgROM[a&(this.c.prgROM.length-1)]:0;}
+  cpuWrite(a,v){if(a>=0x8000)this.bank=v&3;}
+  ppuRead(a){return a<0x2000?this.c.chrROM[(this.bank*0x2000)+a]||0:0;}
+}
+
+class Mapper4 extends Mapper{
+  constructor(c){
+    super(c);this.reg=new Uint8Array(8);this.target=0;this.prgMode=0;this.chrMode=0;
+    this.prgRAM=new Uint8Array(8192);this.chrRAM=new Uint8Array(8192);
+    this.irqL=0;this.irqC=0;this.irqEn=false;this._irq=false;this.mirror=0;
+  }
+  cpuRead(a){
+    const np=this.c.prgROM.length/0x2000|0;
+    if(a>=0x6000&&a<0x8000)return this.prgRAM[a-0x6000];
+    const bank=(off,b)=>this.c.prgROM[((b%np)*0x2000)+off]||0;
+    if(a>=0x8000&&a<0xA000)return bank(a-0x8000,this.prgMode===0?this.reg[6]:(np-2));
+    if(a>=0xA000&&a<0xC000)return bank(a-0xA000,this.reg[7]);
+    if(a>=0xC000&&a<0xE000)return bank(a-0xC000,this.prgMode===0?(np-2):this.reg[6]);
+    if(a>=0xE000)return bank(a-0xE000,np-1);
+    return 0;
+  }
+  cpuWrite(a,v){
+    if(a>=0x6000&&a<0x8000){this.prgRAM[a-0x6000]=v;return;}
+    const e=!(a&1);
+    if(a>=0x8000&&a<0xA000){if(e){this.target=v&7;this.prgMode=(v>>6)&1;this.chrMode=(v>>7)&1;}else this.reg[this.target]=v;}
+    else if(a>=0xA000&&a<0xC000){if(e)this.mirror=v&1;}
+    else if(a>=0xC000&&a<0xE000){if(e)this.irqL=v;else this.irqC=0;}
+    else if(a>=0xE000){if(e){this.irqEn=false;this._irq=false;}else this.irqEn=true;}
+  }
+  ppuRead(a){
+    if(a>=0x2000)return 0;
+    const hasChr=this.c.chrROM.length>0,src=hasChr?this.c.chrROM:this.chrRAM,sz=src.length;
+    let bank,off=a&0x3FF;
+    if(this.chrMode===0){
+      if(a<0x0800)bank=this.reg[0]&0xFE;
+      else if(a<0x1000)bank=(this.reg[0]&0xFE)|1;
+      else if(a<0x1800)bank=this.reg[1]&0xFE;
+      else bank=(this.reg[1]&0xFE)|1;
+    }else{
+      if(a<0x0400)bank=this.reg[2];
+      else if(a<0x0800)bank=this.reg[3];
+      else if(a<0x0C00)bank=this.reg[4];
+      else if(a<0x1000)bank=this.reg[5];
+      else if(a<0x1400)bank=this.reg[0]&0xFE;
+      else if(a<0x1800)bank=(this.reg[0]&0xFE)|1;
+      else if(a<0x1C00)bank=this.reg[1]&0xFE;
+      else bank=(this.reg[1]&0xFE)|1;
+    }
+    return src[(bank*0x400+off)%sz]||0;
+  }
+  ppuWrite(a,v){if(a<0x2000&&!this.c.chrROM.length)this.chrRAM[a&0x1FFF]=v;}
+  irqState(){return this._irq;}
+  irqClear(){this._irq=false;}
+  scanline(){
+    if(this.irqC===0)this.irqC=this.irqL;
+    else this.irqC--;
+    if(this.irqC===0&&this.irqEn)this._irq=true;
+  }
+  getMirror(){return this.mirror?1:0;}
+}
+
+class Mapper7 extends Mapper{
+  constructor(c){super(c);this.bank=0;this.mirror=4;}
+  cpuRead(a){return a>=0x8000?this.c.prgROM[(this.bank*0x8000)+(a-0x8000)%0x8000]||0:0;}
+  cpuWrite(a,v){if(a>=0x8000){this.bank=v&7;this.mirror=(v&0x10)?5:4;}}
+  ppuRead(a){return a<0x2000?(this.c.chrROM.length?this.c.chrROM[a]:this.c.chrRAM[a]):0;}
+  ppuWrite(a,v){if(a<0x2000&&!this.c.chrROM.length)this.c.chrRAM[a]=v;}
+  getMirror(){return this.mirror;}
+}
+
+class Mapper11 extends Mapper{
+  constructor(c){super(c);this.prg=0;this.chr=0;}
+  cpuRead(a){return a>=0x8000?this.c.prgROM[(this.prg*0x8000)+(a-0x8000)]||0:0;}
+  cpuWrite(a,v){if(a>=0x8000){this.prg=v&3;this.chr=(v>>4)&0xF;}}
+  ppuRead(a){return a<0x2000?this.c.chrROM[(this.chr*0x2000)+a]||0:0;}
+}
+
+class Mapper66 extends Mapper{
+  constructor(c){super(c);this.prgB=0;this.chrB=0;}
+  cpuRead(a){return a>=0x8000?this.c.prgROM[(this.prgB*0x8000)+(a-0x8000)%0x8000]||0:0;}
+  cpuWrite(a,v){if(a>=0x8000){this.prgB=(v>>4)&3;this.chrB=v&3;}}
+  ppuRead(a){return a<0x2000?this.c.chrROM[(this.chrB*0x2000)+a]||0:0;}
+}
+
+class Mapper71 extends Mapper{
+  constructor(c){super(c);this.bank=0;}
+  cpuRead(a){
+    if(a>=0x8000&&a<0xC000)return this.c.prgROM[(this.bank*0x4000)+(a-0x8000)]||0;
+    if(a>=0xC000)return this.c.prgROM[(this.c.prgROM.length-0x4000)+(a-0xC000)]||0;
+    return 0;
+  }
+  cpuWrite(a,v){if(a>=0xC000&&a<=0xFFFF)this.bank=v&0x0F;}
+  ppuRead(a){return a<0x2000?(this.c.chrROM.length?this.c.chrROM[a]:this.c.chrRAM[a]):0;}
+  ppuWrite(a,v){if(a<0x2000&&!this.c.chrROM.length)this.c.chrRAM[a]=v;}
+}
+
+
+// ===== CARTRIDGE =====
+class Cartridge{
+  constructor(data){
+    if(data[0]!==0x4E||data[1]!==0x45||data[2]!==0x53||data[3]!==0x1A)throw new Error('Not a valid iNES file');
+    const prgSz=data[4]*0x4000,chrSz=data[5]*0x2000;
+    this.mapperNum=((data[7]&0xF0)|(data[6]>>4));
+    this.mirror=(data[6]&1)?1:0;
+    if(data[6]&8)this.mirror=2;
+    const trainer=(data[6]>>2)&1;
+    const off=16+(trainer?512:0);
+    this.prgROM=data.slice(off,off+prgSz);
+    this.chrROM=chrSz?data.slice(off+prgSz,off+prgSz+chrSz):new Uint8Array(0);
+    this.chrRAM=new Uint8Array(8192);
+    this.prgRAM=new Uint8Array(8192);
+    const M={0:Mapper0,1:Mapper1,2:Mapper2,3:Mapper3,4:Mapper4,7:Mapper7,11:Mapper11,66:Mapper66,71:Mapper71};
+    if(!M[this.mapperNum])throw new Error('Unsupported mapper: '+this.mapperNum);
+    this.mapper=new M[this.mapperNum](this);
+  }
+}
+
+// ===== PPU =====
+class PPU{
+  constructor(){
+    this.vram=new Uint8Array(0x800);
+    this.pal=new Uint8Array(0x20);
+    this.oam=new Uint8Array(0x100);
+    this.oam2=new Uint8Array(0x20);
+    this.cart=null;
+    // loopy
+    this.v=0;this.t=0;this.x=0;this.w=0;
+    // regs
+    this.ctrl=0;this.mask=0;this.status=0;
+    this.oamAddr=0;this.dataBuffer=0;
+    // timing
+    this.cycle=0;this.scanline=0;this.oddFrame=false;
+    // bg shifters
+    this.bgPL=0;this.bgPH=0;this.bgAL=0;this.bgAH=0;
+    // bg latches
+    this.ntByte=0;this.atByte=0;this.bgLo=0;this.bgHi=0;
+    // sprites
+    this.sprN=0;
+    this.spPL=new Uint8Array(8);this.spPH=new Uint8Array(8);
+    this.spX=new Uint8Array(8);this.spA=new Uint8Array(8);
+    this.spr0Hit=false;
+    // output
+    this.framebuf=new Uint32Array(256*240);
+    this.frameReady=false;
+    this.nmiPending=false;
+  }
+
+  mirrorMode(){
+    if(!this.cart)return 0;
+    const m=this.cart.mapper;
+    if(typeof m.getMirror==='function')return m.getMirror();
+    return this.cart.mirror;
+  }
+
+  ntAddr(a){
+    // returns index into this.vram[0..0x7FF]
+    a=(a-0x2000)&0xFFF;
+    const tables=[[0,0,1,1],[0,1,0,1],[0,1,2,3],[0,0,0,0],[0,0,0,0],[1,1,1,1]];
+    const m=this.mirrorMode();
+    const tbl=tables[m]||tables[0];
+    return (tbl[a>>10]&1)*0x400+(a&0x3FF);
+  }
+
+  read(a){
+    a&=0x3FFF;
+    if(a<0x2000)return this.cart.mapper.ppuRead(a);
+    if(a<0x3F00)return this.vram[this.ntAddr(a)];
+    a&=0x1F;
+    if(a===0x10||a===0x14||a===0x18||a===0x1C)a-=0x10;
+    return this.pal[a];
+  }
+
+  write(a,v){
+    a&=0x3FFF;
+    if(a<0x2000){this.cart.mapper.ppuWrite(a,v);return;}
+    if(a<0x3F00){this.vram[this.ntAddr(a)]=v;return;}
+    a&=0x1F;
+    if(a===0x10||a===0x14||a===0x18||a===0x1C)a-=0x10;
+    this.pal[a]=v;
+  }
+
+  reg_write(r,v){
+    switch(r){
+      case 0:this.ctrl=v;this.t=(this.t&0xF3FF)|((v&3)<<10);break;
+      case 1:this.mask=v;break;
+      case 3:this.oamAddr=v;break;
+      case 4:
+        this.oam[this.oamAddr]=(this.oamAddr&3)===2?(v&0xE3):v;
+        this.oamAddr=(this.oamAddr+1)&0xFF;break;
+      case 5:
+        if(!this.w){this.t=(this.t&0xFFE0)|(v>>3);this.x=v&7;this.w=1;}
+        else{this.t=(this.t&0x8FFF)|((v&7)<<12);this.t=(this.t&0xFC1F)|((v&0xF8)<<2);this.w=0;}
+        break;
+      case 6:
+        if(!this.w){this.t=(this.t&0x00FF)|((v&0x3F)<<8);this.w=1;}
+        else{this.t=(this.t&0xFF00)|v;this.v=this.t&0x7FFF;this.w=0;}
+        break;
+      case 7:
+        this.write(this.v,v);
+        this.v=(this.v+((this.ctrl&4)?32:1))&0x7FFF;break;
+    }
+  }
+
+  reg_read(r){
+    switch(r){
+      case 2:{const v=(this.status&0xE0)|(this.dataBuffer&0x1F);this.status&=~0x80;this.w=0;return v;}
+      case 4:return this.oam[this.oamAddr];
+      case 7:{
+        let v=this.dataBuffer;
+        this.dataBuffer=this.read(this.v);
+        if((this.v&0x3FFF)>=0x3F00)v=this.dataBuffer;
+        this.v=(this.v+((this.ctrl&4)?32:1))&0x7FFF;
+        return v;
+      }
+    }
+    return 0;
+  }
+
+  incrX(){
+    if(!(this.mask&0x18))return;
+    if((this.v&0x1F)===31){this.v&=~0x1F;this.v^=0x400;}else this.v++;
+  }
+  incrY(){
+    if(!(this.mask&0x18))return;
+    if((this.v&0x7000)!==0x7000)this.v+=0x1000;
+    else{
+      this.v&=~0x7000;
+      let y=(this.v>>5)&0x1F;
+      if(y===29){y=0;this.v^=0x0800;}else if(y===31)y=0;else y++;
+      this.v=(this.v&~0x03E0)|(y<<5);
+    }
+  }
+  copyX(){if(this.mask&0x18)this.v=(this.v&~0x041F)|(this.t&0x041F);}
+  copyY(){if(this.mask&0x18)this.v=(this.v&~0x7BE0)|(this.t&0x7BE0);}
+
+  loadShift(){
+    this.bgPL=(this.bgPL&0xFF00)|this.bgLo;
+    this.bgPH=(this.bgPH&0xFF00)|this.bgHi;
+    this.bgAL=(this.bgAL&0xFF00)|((this.atByte&1)?0xFF:0);
+    this.bgAH=(this.bgAH&0xFF00)|((this.atByte&2)?0xFF:0);
+  }
+  shiftAll(){
+    if(this.mask&0x08){this.bgPL<<=1;this.bgPH<<=1;this.bgAL<<=1;this.bgAH<<=1;}
+  }
+
+  revByte(b){b=((b&0xF0)>>4)|((b&0x0F)<<4);b=((b&0xCC)>>2)|((b&0x33)<<2);b=((b&0xAA)>>1)|((b&0x55)<<1);return b;}
+
+  evalSprites(){
+    this.sprN=0;this.spr0Hit=false;
+    const h=(this.ctrl&0x20)?16:8;
+    for(let i=0;i<64&&this.sprN<8;i++){
+      const diff=this.scanline-this.oam[i*4];
+      if(diff>=0&&diff<h){
+        if(i===0)this.spr0Hit=true;
+        this.oam2[this.sprN*4]=this.oam[i*4];
+        this.oam2[this.sprN*4+1]=this.oam[i*4+1];
+        this.oam2[this.sprN*4+2]=this.oam[i*4+2];
+        this.oam2[this.sprN*4+3]=this.oam[i*4+3];
+        this.sprN++;
+      }
+    }
+  }
+
+  fetchSprites(){
+    const h=(this.ctrl&0x20)?16:8;
+    for(let i=0;i<this.sprN;i++){
+      let row=this.scanline-this.oam2[i*4];
+      const tile=this.oam2[i*4+1],attr=this.oam2[i*4+2];
+      this.spX[i]=this.oam2[i*4+3];
+      this.spA[i]=attr;
+      if(attr&0x80)row=h-1-row;
+      let pa;
+      if(h===8){
+        pa=((this.ctrl&0x08)?0x1000:0)|(tile<<4)|row;
+      }else{
+        const base=(tile&1)?0x1000:0,t2=(tile&0xFE);
+        pa=row<8?base|(t2<<4)|row:base|((t2+1)<<4)|(row-8);
+      }
+      let lo=this.read(pa),hi=this.read(pa+8);
+      if(attr&0x40){lo=this.revByte(lo);hi=this.revByte(hi);}
+      this.spPL[i]=lo;this.spPH[i]=hi;
+    }
+  }
+
+  tick(){
+    const sl=this.scanline,cy=this.cycle;
+    const render=!!(this.mask&0x18);
+
+    // VBlank
+    if(sl===241&&cy===1){
+      this.status|=0x80;
+      if(this.ctrl&0x80)this.nmiPending=true;
+    }
+    // Pre-render clear
+    if(sl===261&&cy===1){
+      this.status&=~0xE0;
+      for(let i=0;i<8;i++){this.spPL[i]=0;this.spPH[i]=0;}
+    }
+
+    const vis=sl>=0&&sl<240,pre=sl===261;
+
+    if((vis||pre)&&render){
+      // BG fetch pipeline
+      if((cy>=2&&cy<258)||(cy>=321&&cy<338)){
+        this.shiftAll();
+        switch((cy-1)&7){
+          case 0:
+            this.loadShift();
+            this.ntByte=this.read(0x2000|(this.v&0x0FFF));
+            break;
+          case 2:{
+            const a=0x23C0|(this.v&0x0C00)|((this.v>>4)&0x38)|((this.v>>2)&7);
+            let at=this.read(a);
+            if((this.v>>5)&2)at>>=4;
+            if(this.v&2)at>>=2;
+            this.atByte=at&3;
+            break;}
+          case 4:
+            this.bgLo=this.read(((this.ctrl&0x10)?0x1000:0)|(this.ntByte<<4)|(this.v>>12));
+            break;
+          case 6:
+            this.bgHi=this.read(((this.ctrl&0x10)?0x1000:0)|(this.ntByte<<4)|(this.v>>12)|8);
+            break;
+          case 7:this.incrX();break;
+        }
+      }
+      if(cy===256)this.incrY();
+      if(cy===257){this.copyX();if(vis)this.evalSprites();}
+      if(cy===260&&vis&&this.cart&&this.cart.mapper.scanline)this.cart.mapper.scanline();
+      if(cy===340)this.fetchSprites();
+      if(cy===338||cy===340)this.ntByte=this.read(0x2000|(this.v&0x0FFF));
+      if(pre&&cy>=280&&cy<305)this.copyY();
+    }
+
+    // Output pixel
+    if(vis&&cy>=1&&cy<257){
+      const px=cy-1;
+      let bgPx=0,bgPal=0;
+      if(this.mask&0x08){
+        const m=0x8000>>this.x;
+        bgPx=((!!(this.bgPH&m))<<1)|(!!(this.bgPL&m));
+        bgPal=((!!(this.bgAH&m))<<1)|(!!(this.bgAL&m));
+      }
+      if(!(this.mask&0x02)&&px<8){bgPx=0;bgPal=0;}
+
+      let spPx=0,spPal=0,spFg=false,sp0=false;
+      if(this.mask&0x10){
+        for(let i=0;i<this.sprN;i++){
+          const diff = px - this.spX[i];
+          if(diff >= 0 && diff < 8){
+            const shift = 7 - diff;
+            const p = (((this.spPH[i] >> shift) & 1) << 1) | ((this.spPL[i] >> shift) & 1);
+            if(p){
+              spPx=p;spPal=(this.spA[i]&3)+4;spFg=!(this.spA[i]&0x20);
+              if(i===0)sp0=true;
+              break;
+            }
+          }
+        }
+      }
+      if(!(this.mask&0x04)&&px<8)spPx=0;
+
+      if(this.spr0Hit&&sp0&&bgPx&&spPx&&px!==255)this.status|=0x40;
+
+      let palIdx=0;
+      if(!bgPx&&spPx)palIdx=(spPal<<2)|spPx;
+      else if(bgPx&&!spPx)palIdx=(bgPal<<2)|bgPx;
+      else if(bgPx&&spPx)palIdx=spFg?((spPal<<2)|spPx):((bgPal<<2)|bgPx);
+
+      const colorIdx=this.pal[palIdx&0x1F]&0x3F;
+      this.framebuf[sl*256+px]=PALETTE_RGB[colorIdx];
+    }
+
+    // Advance cycle/scanline
+    this.cycle++;
+    if(render&&pre&&this.oddFrame&&this.cycle===340){
+      this.cycle=0;this.scanline=0;this.oddFrame=!this.oddFrame;
+      this.frameReady=true;return;
+    }
+    if(this.cycle>340){
+      this.cycle=0;this.scanline++;
+      if(this.scanline>261){
+        this.scanline=0;this.oddFrame=!this.oddFrame;this.frameReady=true;
+      }
+    }
+  }
+}
+
+// ===== APU =====
+const LENTAB=[10,254,20,2,40,4,80,6,160,8,60,10,14,12,26,14,12,16,24,18,48,20,96,22,192,24,72,26,16,28,32,30];
+const DUTY=[[0,1,0,0,0,0,0,0],[0,1,1,0,0,0,0,0],[0,1,1,1,1,0,0,0],[1,0,0,1,1,1,1,1]];
+const NPER=[4,8,16,32,64,96,128,160,202,254,380,508,762,1016,2034,4068];
+const TRISEQ=[15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15];
+
+class PulseCh{
+  constructor(id){
+    this.id=id;this.en=false;this.duty=0;this.loop=0;this.cv=0;this.vol=0;
+    this.ev=0;this.es=false;this.ec=0;
+    this.swEn=0;this.swP=0;this.swN=0;this.swS=0;this.swC=0;this.swR=false;
+    this.timer=0;this.tLoad=0;this.len=0;this.dp=0;
+  }
+  write(r,v){
+    if(r===0){this.duty=(v>>6)&3;this.loop=(v>>5)&1;this.cv=(v>>4)&1;this.vol=v&0xF;}
+    else if(r===1){this.swEn=(v>>7)&1;this.swP=((v>>4)&7)+1;this.swN=(v>>3)&1;this.swS=v&7;this.swR=true;}
+    else if(r===2)this.tLoad=(this.tLoad&0xFF00)|v;
+    else{this.tLoad=(this.tLoad&0xFF)|((v&7)<<8);if(this.en)this.len=LENTAB[v>>3];this.dp=0;this.es=true;}
+  }
+  tick(){if(this.timer===0){this.timer=this.tLoad;this.dp=(this.dp+1)&7;}else this.timer--;}
+  clockLen(){if(!this.loop&&this.len>0)this.len--;}
+  clockEnv(){
+    if(this.es){this.ev=15;this.ec=this.vol;this.es=false;}
+    else if(this.ec>0)this.ec--;
+    else{this.ec=this.vol;if(this.ev>0)this.ev--;else if(this.loop)this.ev=15;}
+  }
+  clockSwp(){
+    if(this.swR){this.swC=this.swP;this.swR=false;}
+    else if(this.swC>0)this.swC--;
+    else{
+      this.swC=this.swP;
+      if(this.swEn&&this.swS){
+        let d=this.tLoad>>this.swS;
+        if(this.swN)d=this.id===1?~d:-d;
+        const n=this.tLoad+d;
+        if(n<0x800&&this.tLoad>=8)this.tLoad=n;
+      }
+    }
+  }
+  out(){
+    if(!this.en||!this.len||this.tLoad<8||!DUTY[this.duty][this.dp])return 0;
+    return this.cv?this.vol:this.ev;
+  }
+}
+class TriCh{
+  constructor(){this.en=false;this.len=0;this.loop=0;this.ll=0;this.lc=0;this.lr=false;this.timer=0;this.tLoad=0;this.sp=0;}
+  write(r,v){
+    if(r===0){this.loop=(v>>7)&1;this.ll=v&0x7F;}
+    else if(r===2)this.tLoad=(this.tLoad&0xFF00)|v;
+    else{this.tLoad=(this.tLoad&0xFF)|((v&7)<<8);if(this.en)this.len=LENTAB[v>>3];this.lr=true;}
+  }
+  tick(){if(this.timer===0){this.timer=this.tLoad;if(this.len&&this.lc)this.sp=(this.sp+1)&31;}else this.timer--;}
+  clockLen(){if(!this.loop&&this.len>0)this.len--;}
+  clockLin(){if(this.lr)this.lc=this.ll;else if(this.lc>0)this.lc--;if(!this.loop)this.lr=false;}
+  out(){return(!this.en||!this.len||!this.lc)?0:TRISEQ[this.sp];}
+}
+class NoiseCh{
+  constructor(){this.en=false;this.loop=0;this.cv=0;this.vol=0;this.ev=15;this.es=false;this.ec=0;this.len=0;this.mode=false;this.timer=0;this.tLoad=0;this.sr=1;}
+  write(r,v){
+    if(r===0){this.loop=(v>>5)&1;this.cv=(v>>4)&1;this.vol=v&0xF;}
+    else if(r===2){this.mode=!!(v&0x80);this.tLoad=NPER[v&0xF];}
+    else{if(this.en)this.len=LENTAB[v>>3];this.es=true;}
+  }
+  tick(){
+    if(this.timer===0){
+      this.timer=this.tLoad;
+      const fb=(this.sr^(this.mode?(this.sr>>6):(this.sr>>1)))&1;
+      this.sr=(this.sr>>1)|(fb<<14);
+    }else this.timer--;
+  }
+  clockLen(){if(!this.loop&&this.len>0)this.len--;}
+  clockEnv(){
+    if(this.es){this.ev=15;this.ec=this.vol;this.es=false;}
+    else if(this.ec>0)this.ec--;
+    else{this.ec=this.vol;if(this.ev>0)this.ev--;else if(this.loop)this.ev=15;}
+  }
+  out(){return(!this.en||!this.len||this.sr&1)?0:(this.cv?this.vol:this.ev);}
+}
+
+class APU{
+  constructor(){
+    this.p=[new PulseCh(1),new PulseCh(2)];
+    this.tri=new TriCh();this.noise=new NoiseCh();
+    this.fc=0;this.fcMode=0;this.irqPending=false;
+    this.acx=null;this.gainNode=null;this.spNode=null;
+    this.sbuf=new Float32Array(8192);this.sIdx=0;
+    this.cycAcc=0;this.cpuCycPerSamp=1789773/44100;
+    this.vol=0.5;this.clk=0;
+  }
+  initAudio(){
+    try{
+      this.acx=new(window.AudioContext||window.webkitAudioContext)({sampleRate:44100});
+      this.gainNode=this.acx.createGain();this.gainNode.gain.value=this.vol;
+      this.spNode=this.acx.createScriptProcessor(1024,0,1);
+      this.spNode.onaudioprocess=e=>{
+        const o=e.outputBuffer.getChannelData(0);
+        for(let i=0;i<o.length;i++)o[i]=this.sIdx>0?this.sbuf[--this.sIdx]:0;
+      };
+      this.spNode.connect(this.gainNode);this.gainNode.connect(this.acx.destination);
+    }catch(e){}
+  }
+  setVolume(v){this.vol=v;if(this.gainNode)this.gainNode.gain.value=v;}
+  write(a,v){
+    if(a>=0x4000&&a<0x4004)this.p[0].write(a-0x4000,v);
+    else if(a>=0x4004&&a<0x4008)this.p[1].write(a-0x4004,v);
+    else if(a>=0x4008&&a<0x400C)this.tri.write(a-0x4008,v);
+    else if(a>=0x400C&&a<0x4010)this.noise.write(a-0x400C,v);
+    else if(a===0x4015){
+      this.p[0].en=!!(v&1);this.p[1].en=!!(v&2);this.tri.en=!!(v&4);this.noise.en=!!(v&8);
+      if(!this.p[0].en)this.p[0].len=0;if(!this.p[1].en)this.p[1].len=0;
+      if(!this.tri.en)this.tri.len=0;if(!this.noise.en)this.noise.len=0;
+    }else if(a===0x4017){this.fcMode=(v>>7)&1;this.fc=0;if(this.fcMode)this._clockHalf();}
+  }
+  read(a){
+    if(a===0x4015)return (this.p[0].len?1:0)|(this.p[1].len?2:0)|(this.tri.len?4:0)|(this.noise.len?8:0)|(this.irqPending?0x40:0);
+    return 0;
+  }
+  _clockQuarter(){this.p[0].clockEnv();this.p[1].clockEnv();this.tri.clockLin();this.noise.clockEnv();}
+  _clockHalf(){this._clockQuarter();this.p[0].clockLen();this.p[1].clockLen();this.tri.clockLen();this.noise.clockLen();this.p[0].clockSwp();this.p[1].clockSwp();}
+  tick(){
+    this.tri.tick();
+    if(this.clk&1){this.p[0].tick();this.p[1].tick();this.noise.tick();}
+    this.fc++;
+    const P=this.fcMode?18641:14915;
+    if(this.fc===7457)this._clockQuarter();
+    else if(this.fc===14913){this._clockHalf();}
+    else if(this.fc===22371)this._clockQuarter();
+    else if(!this.fcMode&&this.fc===29829){this._clockHalf();if(!this.fcMode)this.irqPending=true;this.fc=0;}
+    else if(this.fcMode&&this.fc===37281){this._clockHalf();this.fc=0;}
+    this.cycAcc++;
+    if(this.cycAcc>=this.cpuCycPerSamp){
+      this.cycAcc-=this.cpuCycPerSamp;
+      this._sample();
+    }
+    this.clk++;
+  }
+  _sample(){
+    if(!this.acx)return;
+    const p1=this.p[0].out(),p2=this.p[1].out(),tr=this.tri.out(),no=this.noise.out();
+    let pulse=0,tnd=0;
+    if(p1+p2>0)pulse=95.88/((8128/(p1+p2))+100);
+    if(tr+no>0)tnd=159.79/(1/(tr/8227+no/12241)+100);
+    if(this.sIdx<this.sbuf.length-1)this.sbuf[this.sIdx++]=(pulse+tnd)*0.5;
+  }
+}
+
+// ===== CPU =====
+class CPU{
+  constructor(bus){this.bus=bus;this.A=0;this.X=0;this.Y=0;this.PC=0;this.SP=0xFD;this.P=0x24;this.cycles=0;}
+  get C(){return(this.P>>0)&1;}get Z(){return(this.P>>1)&1;}get I(){return(this.P>>2)&1;}
+  get V(){return(this.P>>6)&1;}get N(){return(this.P>>7)&1;}
+  sC(v){v?this.P|=1:this.P&=~1;}sZ(v){v?this.P|=2:this.P&=~2;}sI(v){v?this.P|=4:this.P&=~4;}
+  sD(v){v?this.P|=8:this.P&=~8;}sB(v){v?this.P|=0x10:this.P&=~0x10;}
+  sU(v){v?this.P|=0x20:this.P&=~0x20;}sV(v){v?this.P|=0x40:this.P&=~0x40;}
+  sN(v){v?this.P|=0x80:this.P&=~0x80;}
+  sNZ(v){this.sZ(!(v&0xFF));this.sN((v>>7)&1);}
+  r(a){return this.bus.cpuRead(a&0xFFFF);}
+  w(a,v){this.bus.cpuWrite(a&0xFFFF,v&0xFF);}
+  rp(){const v=this.r(this.PC);this.PC=(this.PC+1)&0xFFFF;return v;}
+  push(v){this.w(0x100|this.SP,v);this.SP=(this.SP-1)&0xFF;}
+  pop(){this.SP=(this.SP+1)&0xFF;return this.r(0x100|this.SP);}
+  push16(v){this.push((v>>8)&0xFF);this.push(v&0xFF);}
+  pop16(){return this.pop()|(this.pop()<<8);}
+  reset(){this.SP=0xFD;this.P=0x24;this.PC=this.r(0xFFFC)|(this.r(0xFFFD)<<8);this.cycles=8;}
+  nmi(){this.push16(this.PC);this.sB(0);this.sU(1);this.sI(1);this.push(this.P);this.PC=this.r(0xFFFA)|(this.r(0xFFFB)<<8);this.cycles=8;}
+  irq(){if(this.I)return;this.push16(this.PC);this.sB(0);this.sU(1);this.sI(1);this.push(this.P);this.PC=this.r(0xFFFE)|(this.r(0xFFFF)<<8);this.cycles=7;}
+  step(){
+    if(this.cycles>0){this.cycles--;return;}
+    if(this.bus.nmiPending){this.bus.nmiPending=false;this.nmi();}
+    else if(this.bus.irqPending&&!this.I){this.bus.irqPending=false;this.irq();}
+    this._exec();
+    this.cycles--;
+  }
+  // addressing
+  _zp(){this.cycles+=2;return this.rp();}
+  _zpx(){this.cycles+=3;return(this.rp()+this.X)&0xFF;}
+  _zpy(){this.cycles+=3;return(this.rp()+this.Y)&0xFF;}
+  _abs(){this.cycles+=3;return this.rp()|(this.rp()<<8);}
+  _abx(c){const b=this.rp()|(this.rp()<<8),a=(b+this.X)&0xFFFF;this.cycles+=c&&(a&0xFF00)!==(b&0xFF00)?4:3;return a;}
+  _aby(c){const b=this.rp()|(this.rp()<<8),a=(b+this.Y)&0xFFFF;this.cycles+=c&&(a&0xFF00)!==(b&0xFF00)?4:3;return a;}
+  _izx(){this.cycles+=5;const p=(this.rp()+this.X)&0xFF;return this.r(p)|(this.r((p+1)&0xFF)<<8);}
+  _izy(c){const p=this.rp(),b=this.r(p)|(this.r((p+1)&0xFF)<<8),a=(b+this.Y)&0xFFFF;this.cycles+=c&&(a&0xFF00)!==(b&0xFF00)?5:4;return a;}
+  _imm(){this.cycles++;return this.rp();}
+  _rd_zp(){return this.r(this._zp());}  _rd_zpx(){return this.r(this._zpx());}
+  _rd_zpy(){return this.r(this._zpy());}  _rd_abs(){return this.r(this._abs());}
+  _rd_abx(c){return this.r(this._abx(c));}  _rd_aby(c){return this.r(this._aby(c));}
+  _rd_izx(){return this.r(this._izx());}  _rd_izy(c){return this.r(this._izy(c));}
+  _adc(v){const r=this.A+v+this.C;this.sV(!((this.A^v)&0x80)&&!!((this.A^r)&0x80));this.sC(r>0xFF);this.A=r&0xFF;this.sNZ(this.A);}
+  _sbc(v){this._adc(v^0xFF);}
+  _and(v){this.A&=v;this.sNZ(this.A);}
+  _ora(v){this.A|=v;this.sNZ(this.A);}
+  _eor(v){this.A^=v;this.sNZ(this.A);}
+  _lda(v){this.A=v&0xFF;this.sNZ(this.A);}
+  _ldx(v){this.X=v&0xFF;this.sNZ(this.X);}
+  _ldy(v){this.Y=v&0xFF;this.sNZ(this.Y);}
+  _cmp(reg,v){const r=reg-v;this.sC(reg>=v);this.sZ(!(r&0xFF));this.sN((r>>7)&1);}
+  _bit(v){this.sZ(!(this.A&v));this.sN((v>>7)&1);this.sV((v>>6)&1);}
+  _asl_a(){this.sC(this.A>>7);this.A=(this.A<<1)&0xFF;this.sNZ(this.A);this.cycles+=2;}
+  _lsr_a(){this.sC(this.A&1);this.A>>=1;this.sNZ(this.A);this.cycles+=2;}
+  _rol_a(){const c=this.C;this.sC(this.A>>7);this.A=((this.A<<1)|c)&0xFF;this.sNZ(this.A);this.cycles+=2;}
+  _ror_a(){const c=this.C;this.sC(this.A&1);this.A=(this.A>>1)|(c<<7);this.sNZ(this.A);this.cycles+=2;}
+  _asl(a){let v=this.r(a);this.sC(v>>7);v=(v<<1)&0xFF;this.w(a,v);this.sNZ(v);}
+  _lsr(a){let v=this.r(a);this.sC(v&1);v>>=1;this.w(a,v);this.sNZ(v);}
+  _rol(a){const c=this.C;let v=this.r(a);this.sC(v>>7);v=((v<<1)|c)&0xFF;this.w(a,v);this.sNZ(v);}
+  _ror(a){const c=this.C;let v=this.r(a);this.sC(v&1);v=(v>>1)|(c<<7);this.w(a,v);this.sNZ(v);}
+  _inc(a){const v=(this.r(a)+1)&0xFF;this.w(a,v);this.sNZ(v);}
+  _dec(a){const v=(this.r(a)-1)&0xFF;this.w(a,v);this.sNZ(v);}
+  _branch(cond){const o=this.rp();this.cycles+=2;if(cond){const r=o<0x80?o:o-256;const n=(this.PC+r)&0xFFFF;this.cycles+=(n&0xFF00)!==(this.PC&0xFF00)?2:1;this.PC=n;}}
+  _exec(){
+    const op=this.rp();
+    switch(op){
+      // ADC
+      case 0x69:this._adc(this._imm());break;case 0x65:this._adc(this._rd_zp());break;
+      case 0x75:this._adc(this._rd_zpx());break;case 0x6D:this._adc(this._rd_abs());break;
+      case 0x7D:this._adc(this._rd_abx(true));break;case 0x79:this._adc(this._rd_aby(true));break;
+      case 0x61:this._adc(this._rd_izx());break;case 0x71:this._adc(this._rd_izy(true));break;
+      // SBC
+      case 0xE9:case 0xEB:this._sbc(this._imm());break;case 0xE5:this._sbc(this._rd_zp());break;
+      case 0xF5:this._sbc(this._rd_zpx());break;case 0xED:this._sbc(this._rd_abs());break;
+      case 0xFD:this._sbc(this._rd_abx(true));break;case 0xF9:this._sbc(this._rd_aby(true));break;
+      case 0xE1:this._sbc(this._rd_izx());break;case 0xF1:this._sbc(this._rd_izy(true));break;
+      // AND
+      case 0x29:this._and(this._imm());break;case 0x25:this._and(this._rd_zp());break;
+      case 0x35:this._and(this._rd_zpx());break;case 0x2D:this._and(this._rd_abs());break;
+      case 0x3D:this._and(this._rd_abx(true));break;case 0x39:this._and(this._rd_aby(true));break;
+      case 0x21:this._and(this._rd_izx());break;case 0x31:this._and(this._rd_izy(true));break;
+      // ORA
+      case 0x09:this._ora(this._imm());break;case 0x05:this._ora(this._rd_zp());break;
+      case 0x15:this._ora(this._rd_zpx());break;case 0x0D:this._ora(this._rd_abs());break;
+      case 0x1D:this._ora(this._rd_abx(true));break;case 0x19:this._ora(this._rd_aby(true));break;
+      case 0x01:this._ora(this._rd_izx());break;case 0x11:this._ora(this._rd_izy(true));break;
+      // EOR
+      case 0x49:this._eor(this._imm());break;case 0x45:this._eor(this._rd_zp());break;
+      case 0x55:this._eor(this._rd_zpx());break;case 0x4D:this._eor(this._rd_abs());break;
+      case 0x5D:this._eor(this._rd_abx(true));break;case 0x59:this._eor(this._rd_aby(true));break;
+      case 0x41:this._eor(this._rd_izx());break;case 0x51:this._eor(this._rd_izy(true));break;
+      // LDA
+      case 0xA9:this._lda(this._imm());break;case 0xA5:this._lda(this._rd_zp());break;
+      case 0xB5:this._lda(this._rd_zpx());break;case 0xAD:this._lda(this._rd_abs());break;
+      case 0xBD:this._lda(this._rd_abx(true));break;case 0xB9:this._lda(this._rd_aby(true));break;
+      case 0xA1:this._lda(this._rd_izx());break;case 0xB1:this._lda(this._rd_izy(true));break;
+      // LDX
+      case 0xA2:this._ldx(this._imm());break;case 0xA6:this._ldx(this._rd_zp());break;
+      case 0xB6:this._ldx(this._rd_zpy());break;case 0xAE:this._ldx(this._rd_abs());break;
+      case 0xBE:this._ldx(this._rd_aby(true));break;
+      // LDY
+      case 0xA0:this._ldy(this._imm());break;case 0xA4:this._ldy(this._rd_zp());break;
+      case 0xB4:this._ldy(this._rd_zpx());break;case 0xAC:this._ldy(this._rd_abs());break;
+      case 0xBC:this._ldy(this._rd_abx(true));break;
+      // STA
+      case 0x85:this.w(this._zp(),this.A);break;
+      case 0x95:this.w(this._zpx(),this.A);break;
+      case 0x8D:this.w(this._abs(),this.A);this.cycles++;break;
+      case 0x9D:this.w(this._abx(false),this.A);this.cycles++;break;
+      case 0x99:this.w(this._aby(false),this.A);this.cycles++;break;
+      case 0x81:this.w(this._izx(),this.A);break;
+      case 0x91:this.w(this._izy(false),this.A);this.cycles++;break;
+      // STX
+      case 0x86:this.w(this._zp(),this.X);break;
+      case 0x96:this.w(this._zpy(),this.X);break;
+      case 0x8E:this.w(this._abs(),this.X);this.cycles++;break;
+      // STY
+      case 0x84:this.w(this._zp(),this.Y);break;
+      case 0x94:this.w(this._zpx(),this.Y);break;
+      case 0x8C:this.w(this._abs(),this.Y);this.cycles++;break;
+      // CMP
+      case 0xC9:this._cmp(this.A,this._imm());break;case 0xC5:this._cmp(this.A,this._rd_zp());break;
+      case 0xD5:this._cmp(this.A,this._rd_zpx());break;case 0xCD:this._cmp(this.A,this._rd_abs());break;
+      case 0xDD:this._cmp(this.A,this._rd_abx(true));break;case 0xD9:this._cmp(this.A,this._rd_aby(true));break;
+      case 0xC1:this._cmp(this.A,this._rd_izx());break;case 0xD1:this._cmp(this.A,this._rd_izy(true));break;
+      // CPX
+      case 0xE0:this._cmp(this.X,this._imm());break;case 0xE4:this._cmp(this.X,this._rd_zp());break;case 0xEC:this._cmp(this.X,this._rd_abs());break;
+      // CPY
+      case 0xC0:this._cmp(this.Y,this._imm());break;case 0xC4:this._cmp(this.Y,this._rd_zp());break;case 0xCC:this._cmp(this.Y,this._rd_abs());break;
+      // BIT
+      case 0x24:this._bit(this._rd_zp());break;case 0x2C:this._bit(this._rd_abs());break;
+      // ASL
+      case 0x0A:this._asl_a();break;
+      case 0x06:{const a=this._zp();this._asl(a);this.cycles+=2;}break;
+      case 0x16:{const a=this._zpx();this._asl(a);this.cycles+=2;}break;
+      case 0x0E:{const a=this._abs();this._asl(a);this.cycles+=2;}break;
+      case 0x1E:{const a=this._abx(false);this._asl(a);this.cycles+=3;}break;
+      // LSR
+      case 0x4A:this._lsr_a();break;
+      case 0x46:{const a=this._zp();this._lsr(a);this.cycles+=2;}break;
+      case 0x56:{const a=this._zpx();this._lsr(a);this.cycles+=2;}break;
+      case 0x4E:{const a=this._abs();this._lsr(a);this.cycles+=2;}break;
+      case 0x5E:{const a=this._abx(false);this._lsr(a);this.cycles+=3;}break;
+      // ROL
+      case 0x2A:this._rol_a();break;
+      case 0x26:{const a=this._zp();this._rol(a);this.cycles+=2;}break;
+      case 0x36:{const a=this._zpx();this._rol(a);this.cycles+=2;}break;
+      case 0x2E:{const a=this._abs();this._rol(a);this.cycles+=2;}break;
+      case 0x3E:{const a=this._abx(false);this._rol(a);this.cycles+=3;}break;
+      // ROR
+      case 0x6A:this._ror_a();break;
+      case 0x66:{const a=this._zp();this._ror(a);this.cycles+=2;}break;
+      case 0x76:{const a=this._zpx();this._ror(a);this.cycles+=2;}break;
+      case 0x6E:{const a=this._abs();this._ror(a);this.cycles+=2;}break;
+      case 0x7E:{const a=this._abx(false);this._ror(a);this.cycles+=3;}break;
+      // INC
+      case 0xE6:{const a=this._zp();this._inc(a);this.cycles+=2;}break;
+      case 0xF6:{const a=this._zpx();this._inc(a);this.cycles+=2;}break;
+      case 0xEE:{const a=this._abs();this._inc(a);this.cycles+=2;}break;
+      case 0xFE:{const a=this._abx(false);this._inc(a);this.cycles+=3;}break;
+      // DEC
+      case 0xC6:{const a=this._zp();this._dec(a);this.cycles+=2;}break;
+      case 0xD6:{const a=this._zpx();this._dec(a);this.cycles+=2;}break;
+      case 0xCE:{const a=this._abs();this._dec(a);this.cycles+=2;}break;
+      case 0xDE:{const a=this._abx(false);this._dec(a);this.cycles+=3;}break;
+      // INX/INY/DEX/DEY
+      case 0xE8:this.X=(this.X+1)&0xFF;this.sNZ(this.X);this.cycles+=2;break;
+      case 0xC8:this.Y=(this.Y+1)&0xFF;this.sNZ(this.Y);this.cycles+=2;break;
+      case 0xCA:this.X=(this.X-1)&0xFF;this.sNZ(this.X);this.cycles+=2;break;
+      case 0x88:this.Y=(this.Y-1)&0xFF;this.sNZ(this.Y);this.cycles+=2;break;
+      // Transfer
+      case 0xAA:this.X=this.A;this.sNZ(this.X);this.cycles+=2;break;
+      case 0xA8:this.Y=this.A;this.sNZ(this.Y);this.cycles+=2;break;
+      case 0xBA:this.X=this.SP;this.sNZ(this.X);this.cycles+=2;break;
+      case 0x8A:this.A=this.X;this.sNZ(this.A);this.cycles+=2;break;
+      case 0x9A:this.SP=this.X;this.cycles+=2;break;
+      case 0x98:this.A=this.Y;this.sNZ(this.A);this.cycles+=2;break;
+      // JMP/JSR/RTS/RTI
+      case 0x4C:this.PC=this._abs();this.cycles--;break;
+      case 0x6C:{const p=this._abs();this.PC=this.r(p)|(this.r((p&0xFF00)|((p+1)&0xFF))<<8);this.cycles++;break;}
+      case 0x20:{const a=this._abs();this.push16((this.PC-1)&0xFFFF);this.PC=a;this.cycles+=2;break;}
+      case 0x60:this.PC=(this.pop16()+1)&0xFFFF;this.cycles+=6;break;
+      case 0x40:this.P=(this.pop()|0x20)&~0x10;this.PC=this.pop16();this.cycles+=6;break;
+      // BRK
+      case 0x00:
+        this.PC=(this.PC+1)&0xFFFF;this.push16(this.PC);this.sB(1);this.sU(1);this.push(this.P);this.sI(1);
+        this.PC=this.r(0xFFFE)|(this.r(0xFFFF)<<8);this.cycles+=7;break;
+      // Stack
+      case 0x48:this.push(this.A);this.cycles+=3;break;
+      case 0x08:this.sU(1);this.push(this.P);this.cycles+=3;break;
+      case 0x68:this.A=this.pop();this.sNZ(this.A);this.cycles+=4;break;
+      case 0x28:this.P=(this.pop()|0x20)&~0x10;this.cycles+=4;break;
+      // Flags
+      case 0x18:this.sC(0);this.cycles+=2;break;case 0xD8:this.sD(0);this.cycles+=2;break;
+      case 0x58:this.sI(0);this.cycles+=2;break;case 0xB8:this.sV(0);this.cycles+=2;break;
+      case 0x38:this.sC(1);this.cycles+=2;break;case 0xF8:this.sD(1);this.cycles+=2;break;
+      case 0x78:this.sI(1);this.cycles+=2;break;
+      // Branches
+      case 0x90:this._branch(!this.C);break;case 0xB0:this._branch(!!this.C);break;
+      case 0xF0:this._branch(!!this.Z);break;case 0x30:this._branch(!!this.N);break;
+      case 0xD0:this._branch(!this.Z);break;case 0x10:this._branch(!this.N);break;
+      case 0x50:this._branch(!this.V);break;case 0x70:this._branch(!!this.V);break;
+      // NOP
+      case 0xEA:this.cycles+=2;break;
+      // Illegal LAX
+      case 0xA7:{const v=this._rd_zp();this.A=v;this.X=v;this.sNZ(v);}break;
+      case 0xB7:{const v=this._rd_zpy();this.A=v;this.X=v;this.sNZ(v);}break;
+      case 0xAF:{const v=this._rd_abs();this.A=v;this.X=v;this.sNZ(v);}break;
+      case 0xBF:{const v=this._rd_aby(true);this.A=v;this.X=v;this.sNZ(v);}break;
+      case 0xA3:{const v=this._rd_izx();this.A=v;this.X=v;this.sNZ(v);}break;
+      case 0xB3:{const v=this._rd_izy(true);this.A=v;this.X=v;this.sNZ(v);}break;
+      // Illegal SAX
+      case 0x87:this.w(this._zp(),this.A&this.X);break;
+      case 0x97:this.w(this._zpy(),this.A&this.X);break;
+      case 0x8F:this.w(this._abs(),this.A&this.X);this.cycles++;break;
+      case 0x83:this.w(this._izx(),this.A&this.X);break;
+      // Illegal DCP
+      case 0xC7:{const a=this._zp();this._dec(a);this._cmp(this.A,this.r(a));this.cycles+=2;}break;
+      case 0xD7:{const a=this._zpx();this._dec(a);this._cmp(this.A,this.r(a));this.cycles+=2;}break;
+      case 0xCF:{const a=this._abs();this._dec(a);this._cmp(this.A,this.r(a));this.cycles+=2;}break;
+      case 0xDF:{const a=this._abx(false);this._dec(a);this._cmp(this.A,this.r(a));this.cycles+=3;}break;
+      case 0xDB:{const a=this._aby(false);this._dec(a);this._cmp(this.A,this.r(a));this.cycles+=3;}break;
+      case 0xC3:{const a=this._izx();this._dec(a);this._cmp(this.A,this.r(a));this.cycles+=2;}break;
+      case 0xD3:{const a=this._izy(false);this._dec(a);this._cmp(this.A,this.r(a));this.cycles+=3;}break;
+      // Illegal ISC
+      case 0xE7:{const a=this._zp();this._inc(a);this._sbc(this.r(a));this.cycles+=2;}break;
+      case 0xF7:{const a=this._zpx();this._inc(a);this._sbc(this.r(a));this.cycles+=2;}break;
+      case 0xEF:{const a=this._abs();this._inc(a);this._sbc(this.r(a));this.cycles+=2;}break;
+      case 0xFF:{const a=this._abx(false);this._inc(a);this._sbc(this.r(a));this.cycles+=3;}break;
+      case 0xFB:{const a=this._aby(false);this._inc(a);this._sbc(this.r(a));this.cycles+=3;}break;
+      case 0xE3:{const a=this._izx();this._inc(a);this._sbc(this.r(a));this.cycles+=2;}break;
+      case 0xF3:{const a=this._izy(false);this._inc(a);this._sbc(this.r(a));this.cycles+=3;}break;
+      // Illegal SLO
+      case 0x07:{const a=this._zp();this._asl(a);this._ora(this.r(a));this.cycles+=2;}break;
+      case 0x17:{const a=this._zpx();this._asl(a);this._ora(this.r(a));this.cycles+=2;}break;
+      case 0x0F:{const a=this._abs();this._asl(a);this._ora(this.r(a));this.cycles+=2;}break;
+      case 0x1F:{const a=this._abx(false);this._asl(a);this._ora(this.r(a));this.cycles+=3;}break;
+      case 0x1B:{const a=this._aby(false);this._asl(a);this._ora(this.r(a));this.cycles+=3;}break;
+      case 0x03:{const a=this._izx();this._asl(a);this._ora(this.r(a));this.cycles+=2;}break;
+      case 0x13:{const a=this._izy(false);this._asl(a);this._ora(this.r(a));this.cycles+=3;}break;
+      // Illegal RLA
+      case 0x27:{const a=this._zp();this._rol(a);this._and(this.r(a));this.cycles+=2;}break;
+      case 0x37:{const a=this._zpx();this._rol(a);this._and(this.r(a));this.cycles+=2;}break;
+      case 0x2F:{const a=this._abs();this._rol(a);this._and(this.r(a));this.cycles+=2;}break;
+      case 0x3F:{const a=this._abx(false);this._rol(a);this._and(this.r(a));this.cycles+=3;}break;
+      case 0x3B:{const a=this._aby(false);this._rol(a);this._and(this.r(a));this.cycles+=3;}break;
+      case 0x23:{const a=this._izx();this._rol(a);this._and(this.r(a));this.cycles+=2;}break;
+      case 0x33:{const a=this._izy(false);this._rol(a);this._and(this.r(a));this.cycles+=3;}break;
+      // Illegal SRE
+      case 0x47:{const a=this._zp();this._lsr(a);this._eor(this.r(a));this.cycles+=2;}break;
+      case 0x57:{const a=this._zpx();this._lsr(a);this._eor(this.r(a));this.cycles+=2;}break;
+      case 0x4F:{const a=this._abs();this._lsr(a);this._eor(this.r(a));this.cycles+=2;}break;
+      case 0x5F:{const a=this._abx(false);this._lsr(a);this._eor(this.r(a));this.cycles+=3;}break;
+      case 0x5B:{const a=this._aby(false);this._lsr(a);this._eor(this.r(a));this.cycles+=3;}break;
+      case 0x43:{const a=this._izx();this._lsr(a);this._eor(this.r(a));this.cycles+=2;}break;
+      case 0x53:{const a=this._izy(false);this._lsr(a);this._eor(this.r(a));this.cycles+=3;}break;
+      // Illegal RRA
+      case 0x67:{const a=this._zp();this._ror(a);this._adc(this.r(a));this.cycles+=2;}break;
+      case 0x77:{const a=this._zpx();this._ror(a);this._adc(this.r(a));this.cycles+=2;}break;
+      case 0x6F:{const a=this._abs();this._ror(a);this._adc(this.r(a));this.cycles+=2;}break;
+      case 0x7F:{const a=this._abx(false);this._ror(a);this._adc(this.r(a));this.cycles+=3;}break;
+      case 0x7B:{const a=this._aby(false);this._ror(a);this._adc(this.r(a));this.cycles+=3;}break;
+      case 0x63:{const a=this._izx();this._ror(a);this._adc(this.r(a));this.cycles+=2;}break;
+      case 0x73:{const a=this._izy(false);this._ror(a);this._adc(this.r(a));this.cycles+=3;}break;
+      // Misc illegals
+      case 0x0B:case 0x2B:{const v=this._imm();this.A&=v;this.sNZ(this.A);this.sC(this.N);}break;
+      case 0x4B:{this.A&=this._imm();this._lsr_a();}break;
+      case 0x6B:{this.A&=this._imm();this._ror_a();this.sC((this.A>>6)&1);this.sV(((this.A>>5)^(this.A>>6))&1);}break;
+      case 0x8B:this.A=(this.A|0xEE)&this.X&this._imm();this.sNZ(this.A);break;
+      case 0xCB:{const v=this._imm();this.X=(this.A&this.X);this._cmp(this.X,v);this.X=(this.X-v)&0xFF;}break;
+      case 0x9C:{const b=this.rp()|(this.rp()<<8);this.w(b+this.X,(this.Y&((b>>8)+1))&0xFF);this.cycles+=4;}break;
+      case 0x9E:{const b=this.rp()|(this.rp()<<8);this.w(b+this.Y,(this.X&((b>>8)+1))&0xFF);this.cycles+=4;}break;
+      // Illegal NOPs
+      case 0x1A:case 0x3A:case 0x5A:case 0x7A:case 0xDA:case 0xFA:this.cycles+=2;break;
+      case 0x80:case 0x82:case 0x89:case 0xC2:case 0xE2:this.rp();this.cycles+=2;break;
+      case 0x04:case 0x44:case 0x64:this._zp();break;
+      case 0x14:case 0x34:case 0x54:case 0x74:case 0xD4:case 0xF4:this._zpx();break;
+      case 0x0C:this._abs();break;
+      case 0x1C:case 0x3C:case 0x5C:case 0x7C:case 0xDC:case 0xFC:this._abx(true);break;
+      default:this.cycles+=2;break;
+    }
+  }
+}
+
+// ===== NES BUS =====
+class NES{
+  constructor(){
+    this.ram=new Uint8Array(0x800);
+    this.ppu=new PPU();this.apu=new APU();
+    this.cpu=new CPU(this);
+    this.cart=null;
+    this.ctrl=[0,0];this.ctrlLatch=[0,0];this.ctrlBit=[0,0];this.strobe=0;
+    this.nmiPending=false;this.irqPending=false;
+    this.dmaPending=false;this.dmaPage=0;this.dmaAddr=0;this.dmaCyc=0;
+    this.clk=0;
+    this.ppu.bus=this;this.apu.bus=this;
+  }
+  load(cart){
+    this.cart=cart;this.ppu.cart=cart;
+    this.reset();
+  }
+  reset(){
+    this.ram.fill(0);
+    this.ppu=new PPU();this.ppu.cart=this.cart;this.ppu.bus=this;
+    this.apu=new APU();this.apu.bus=this;this.apu.initAudio();
+    this.nmiPending=false;this.irqPending=false;this.dmaPending=false;this.clk=0;
+    this.cpu.reset();
+  }
+  cpuRead(a){
+    if(a<0x2000)return this.ram[a&0x7FF];
+    if(a<0x4000)return this.ppu.reg_read(a&7);
+    if(a===0x4015)return this.apu.read(a);
+    if(a===0x4016){
+      if(this.strobe)return(this.ctrl[0]&1)|0x40;
+      const v=(this.ctrlLatch[0]>>this.ctrlBit[0])&1;
+      if(this.ctrlBit[0]<8)this.ctrlBit[0]++;
+      return v|0x40;
+    }
+    if(a===0x4017){
+      if(this.strobe)return(this.ctrl[1]&1)|0x40;
+      const v=(this.ctrlLatch[1]>>this.ctrlBit[1])&1;
+      if(this.ctrlBit[1]<8)this.ctrlBit[1]++;
+      return v|0x40;
+    }
+    if(a>=0x4020&&this.cart)return this.cart.mapper.cpuRead(a);
+    return 0;
+  }
+  cpuWrite(a,v){
+    if(a<0x2000){this.ram[a&0x7FF]=v;return;}
+    if(a<0x4000){this.ppu.reg_write(a&7,v);return;}
+    if(a===0x4014){this.dmaPending=true;this.dmaPage=v;this.dmaAddr=0;this.dmaCyc=0;return;}
+    if(a===0x4016){
+      const prev=this.strobe;
+      this.strobe=v&1;
+      if(prev&&!this.strobe){
+        // falling edge: latch current button state and reset shift counters
+        this.ctrlLatch[0]=this.ctrl[0];
+        this.ctrlLatch[1]=this.ctrl[1];
+        this.ctrlBit[0]=0;
+        this.ctrlBit[1]=0;
+      }
+      return;
+    }
+    if(a>=0x4000&&a<0x4020){this.apu.write(a,v);return;}
+    if(a>=0x4020&&this.cart)this.cart.mapper.cpuWrite(a,v);
+  }
+  tick(){
+    this.ppu.tick();this.ppu.tick();this.ppu.tick();
+    this.apu.tick();
+    if(this.ppu.nmiPending){this.ppu.nmiPending=false;this.nmiPending=true;}
+    if(this.cart&&this.cart.mapper.irqState()){this.cart.mapper.irqClear();this.irqPending=true;}
+    if(this.dmaPending){
+      if(this.dmaCyc===0&&(this.clk&1)){this.dmaCyc++;this.clk++;return;}
+      if(this.dmaCyc&1){
+        this.ppu.oam[this.ppu.oamAddr]=this.cpuRead((this.dmaPage<<8)|this.dmaAddr);
+        this.ppu.oamAddr=(this.ppu.oamAddr+1)&0xFF;
+        this.dmaAddr=(this.dmaAddr+1)&0xFF;
+        if(this.dmaAddr===0){this.dmaPending=false;this.dmaCyc=0;this.clk++;return;}
+      }
+      this.dmaCyc++;this.clk++;return;
+    }
+    this.cpu.step();this.clk++;
+  }
+  runFrame(){
+    this.ppu.frameReady=false;
+    for(let i=0;i<89342&&!this.ppu.frameReady;i++)this.tick();
+    // If somehow frameReady still not set, force it
+    if(!this.ppu.frameReady){
+      let safety=0;
+      while(!this.ppu.frameReady&&safety++<30000)this.tick();
+    }
+  }
+}
+
+// ===== RENDER =====
+const canvas=document.getElementById('canvas');
+const ctx=canvas.getContext('2d');
+const imageData=ctx.createImageData(256,240);
+const idata=imageData.data;
+
+function renderFrame(nes){
+  const fb=nes.ppu.framebuf;
+  for(let i=0;i<61440;i++){
+    const c=fb[i]; // 0xRRGGBB
+    const j=i<<2;
+    idata[j]  =(c>>16)&0xFF;
+    idata[j+1]=(c>>8)&0xFF;
+    idata[j+2]= c&0xFF;
+    idata[j+3]=255;
+  }
+  ctx.putImageData(imageData,0,0);
+}
+
+// ===== INPUT =====
+// Buttons: A=0x01 B=0x02 Select=0x04 Start=0x08 Up=0x10 Down=0x20 Left=0x40 Right=0x80
+const KEYMAP={KeyZ:0x01,KeyX:0x02,ShiftLeft:0x04,ShiftRight:0x04,Enter:0x08,
+              ArrowUp:0x10,ArrowDown:0x20,ArrowLeft:0x40,ArrowRight:0x80};
+let pad=0;
+window.addEventListener('keydown',e=>{
+  if(KEYMAP[e.code]!==undefined){pad|=KEYMAP[e.code];if(nes)nes.ctrl[0]=pad;e.preventDefault();}
+  if(e.code==='KeyR')resetNES();
+});
+window.addEventListener('keyup',e=>{
+  if(KEYMAP[e.code]!==undefined){pad&=~KEYMAP[e.code];if(nes)nes.ctrl[0]=pad;}
+});
+
+// ===== LOOP =====
+let nes=null,running=false,paused=false,rafId=null,fpsCount=0,fpsLast=0;
+
+function loop(ts){
+  if(running&&!paused&&nes){
+    nes.runFrame();
+    renderFrame(nes);
+    fpsCount++;
+    if(ts-fpsLast>=1000){
+      document.getElementById('fps-counter').textContent=fpsCount;
+      fpsCount=0;fpsLast=ts;
+    }
+  }
+  rafId=requestAnimationFrame(loop);
+}
+
+async function loadROM(input){
+  const file=input.files[0];if(!file)return;
+  document.getElementById('error-msg').textContent='';
+  try{
+    const data=new Uint8Array(await file.arrayBuffer());
+    const cart=new Cartridge(data);
+    if(!nes)nes=new NES();
+    nes.load(cart);
+    document.getElementById('game-name').textContent=file.name.replace(/\.nes$/i,'');
+    document.getElementById('mapper-id').textContent=cart.mapperNum;
+    const ov=document.getElementById('overlay');
+    ov.style.opacity='0';setTimeout(()=>ov.style.display='none',300);
+    running=true;paused=false;
+    document.getElementById('pauseBtn').textContent='PAUSE';
+    if(!rafId)rafId=requestAnimationFrame(loop);
+    // Resume AudioContext (browser policy)
+    if(nes.apu.acx&&nes.apu.acx.state==='suspended')nes.apu.acx.resume();
+  }catch(e){
+    document.getElementById('error-msg').textContent='Error: '+e.message;
+    console.error(e);
+  }
+}
+
+// Drag-and-drop
+const wrap=document.getElementById('screen-wrap');
+wrap.addEventListener('dragover',e=>e.preventDefault());
+wrap.addEventListener('drop',e=>{
+  e.preventDefault();
+  const f=e.dataTransfer.files[0];
+  if(f&&/\.nes$/i.test(f.name)){
+    const dt=new DataTransfer();dt.items.add(f);
+    const fi=document.getElementById('file-input');fi.files=dt.files;
+    loadROM(fi);
+  }
+});
+
+function resetNES(){if(nes&&nes.cart){nes.reset();running=true;paused=false;}}
+function togglePause(){
+  paused=!paused;
+  document.getElementById('pauseBtn').textContent=paused?'RESUME':'PAUSE';
+  if(nes&&nes.apu.acx){paused?nes.apu.acx.suspend():nes.apu.acx.resume();}
+}
+function toggleFullscreen(){
+  if(!document.fullscreenElement)wrap.requestFullscreen();
+  else document.exitFullscreen();
+}
+function setVolume(v){if(nes&&nes.apu)nes.apu.setVolume(v/100);}
+document.addEventListener('fullscreenchange',()=>{
+  const fs=!!document.fullscreenElement;
+  canvas.style.width=fs?'100vw':'512px';
+  canvas.style.height=fs?'100vh':'480px';
+});
+
+// Start render loop immediately so it's ready
+rafId=requestAnimationFrame(loop);
+</script>
+</body>
+</html>
