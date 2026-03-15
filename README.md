@@ -1,5 +1,8 @@
 # Vibe-NES
-<img src="nes.png" width="700">
+<p align="center">
+  <img src="nes.png" width="400">
+</p>
+
 ```text
  __      ___ _                 _   _ ______  _____ 
  \ \    / (_) |               | \ | |  ____|/ ____|
