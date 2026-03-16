@@ -34,7 +34,7 @@ Drag and drop your favorite `.nes` ROMs to start playing.
 
 # 🚀 Quick Start
 
-1. Download **`nes-emulator_4.html`**
+1. Download **`vibe-nes.html`**
 2. Open it in any modern web browser
 
    * Chrome
